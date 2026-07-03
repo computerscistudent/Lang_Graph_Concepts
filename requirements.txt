@@ -1,0 +1,30 @@
+﻿# LangChain Core
+langchain==0.3.17
+langchain-core==0.3.84   
+
+# OpenAI Integration
+langchain-openai==0.3.2
+openai==1.61.0
+
+# Anthropic Integration
+langchain-anthropic==0.3.5
+
+# Google Gemini Integration
+langchain-google-genai==2.0.9
+google-generativeai==0.8.4
+
+# Hugging Face Integration
+langchain-huggingface==0.3.1
+transformers==4.48.0
+huggingface-hub==0.36.2   
+
+# Environment
+python-dotenv==1.0.1
+
+# ML
+numpy>=1.24.0,<2.0.0
+scikit-learn>=1.2.2
+
+streamlit==1.56.0
+
+langgraph
