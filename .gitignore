@@ -29,3 +29,5 @@ Desktop.ini
 # Ignore any temp files or build artifacts
 dist/
 build/
+
+eg.txt
