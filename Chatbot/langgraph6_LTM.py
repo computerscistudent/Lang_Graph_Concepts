@@ -18,6 +18,12 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 import tempfile
+import json
+import uuid
+from pydantic import Field , BaseModel
+from typing import List
+from langchain_openai import ChatOpenAI
+from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
@@ -26,6 +32,40 @@ llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"), #type:ignore
     temperature=0.4
 )
+
+extractor_llm = ChatOpenAI(model='gpt-4o-mini')
+
+class StoreItem:
+    def __init__(self,value):
+        self.value = value
+
+class SimpleSQLliteStore:
+    def __init__(self,conn):
+        self.conn = conn
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS long_term_memory 
+                             (namespace TEXT, key TEXT, data TEXT, 
+                             PRIMARY KEY (namespace, key))''')
+        self.conn.commit()
+
+    def put(self,namespace:tuple,key:str, value:dict):
+        ns_str = " ".join(namespace)
+        data_str = json.dumps(value)
+
+        self.conn.execute("INSERT OR REPLACE INTO long_term_memory (namespace, key, data) VALUES (?,?,?)", (ns_str,key,data_str))
+        self.conn.commit()
+
+    def search(self,namespace:tuple):
+        ns_str = "_".join(namespace)
+        cursor = self.conn.execute("SELECT data FROM long_term_memory WHERE namespace = ?", (ns_str,))
+        return [StoreItem(json.loads(row[0])) for row in cursor.fetchall()]
+
+    def get(self,namespace:tuple,key:str):
+        ns_str = "_".join(namespace)
+        cursor = self.conn.execute("SELECT data FROM long_term_memory WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row:
+            return json.loads(row[0])
+        return None
 
 wrapper = DuckDuckGoSearchAPIWrapper(region='us-en')
 
@@ -158,19 +198,80 @@ class State(TypedDict):
     summary: str
     summarized_index: int
 
-def chat_node(state:State):
-    summary = state.get('summary','')
-    messages = state['messages']
-    summarized_index = state.get('summarized_index', 0)
+class MemoryItem(BaseModel):
+    text: str = Field(description='Atomic user memory as a short sentence')
+    is_new: bool = Field(description='True if the memory is new and should be stored. False if Duplicate/already known.')
 
-    mssg_to_pass = messages[summarized_index:]
-    if summary:
-        sys_mssg = SystemMessage(content=f"Summary of previous conversation: {summary}")
-        mssg_to_pass = [sys_mssg]+mssg_to_pass # We wont pass the messages that we got from state['messages'] because they are already summarized and we will pass the summary instead. This is to avoid the model from getting confused with too many messages and to keep the context window small.
-    # else:
-    #     mssg_to_pass = messages
-    response = llm_with_tools.invoke(mssg_to_pass)
-    return {"messages":[response]}
+class MemoryDecision(BaseModel):
+    should_write: bool = Field(description="whether to store any memories.")
+    memories: List[MemoryItem] = Field(default_factory=list, description="atomic user memories to store")
+
+ext_llm_with_structure = extractor_llm.with_structured_output(MemoryDecision)
+
+SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant with memory capabilities.
+If user-specific memory is available, use it to personalize your responses based on what you know about the user.
+Your goal is to provide relevant, friendly, and tailored assistance that reflects the user's preferences, context, and past interactions.
+
+CURRENT KNOWN USER DETAILS (Long-Term Memory):
+{user_details_content}
+
+{short_term_context}
+"""
+
+MEMORY_PROMPT = """You are responsible for updating and maintaining accurate user memory.
+CURRENT USER DETAILS (existing memories):
+{user_details_content}
+
+TASK:
+- Review the user's latest message.
+- Extract user-specific info worth storing long-term (identity, stable preferences, ongoing projects/goals).
+- For each extracted item, set is_new=true ONLY if it adds NEW information compared to CURRENT USER DETAILS.
+- Keep each memory as a short atomic sentence. No speculation; only facts stated by the user.
+"""
+
+def remember_node(state:State, config:RunnableConfig):
+    user_id = config.get('configurable',{}).get('user_id', 'default_user')
+    namespace = ('user',user_id,'details')
+    last_mssg = state['messages'][-1].content
+    items = ltm_store.search(namespace)
+    user_details_content = "\n".join(f"-- {it.value.get('data','')}" for it in items)
+    memory_mssg = MEMORY_PROMPT.format(user_details_content=user_details_content)
+    decision = ext_llm_with_structure.invoke([SystemMessage(content=memory_mssg),
+                                              HumanMessage(content=last_mssg)  
+                                            ]
+                                        )
+    
+    if decision.should_write:               #type:ignore
+        for mem in decision.memories:       #type:ignore
+            if mem.is_new:
+                ltm_store.put(namespace,str(uuid.uuid4()),{'data':mem.text})
+    
+    return {}
+
+def chat_node(state:State,config: RunnableConfig):
+    """Generates the chat response using both Long-Term and Short-Term memory."""
+    user_id = config.get('configurable', {}).get('user_id', 'default_user')
+    namespace = ('user', user_id, 'details')
+    
+    items = ltm_store.search(namespace)
+    user_detail = "\n".join(f"- {it.value.get('data', '')}" for it in items) if items else "(empty)"
+    
+    # 2.Fetch Short Term Memory (Summary)
+    summary = state.get('summary', '')
+    short_term_context = f"Short-Term Context (Recent Chat Summary):\n{summary}" if summary else ""
+
+    # 3.Combine into the ultimate System Prompt
+    sys_mssg = SystemMessage(content=SYSTEM_PROMPT_TEMPLATE.format(
+        user_details_content=user_detail, 
+        short_term_context=short_term_context
+    ))
+    
+    # 4.Filter messages (Smart Scissors logic)
+    summarized_index = state.get('summarized_index', 0)
+    mssg_to_pass = [sys_mssg] + state['messages'][summarized_index:]
+    
+    response = llm_with_tools.invoke(mssg_to_pass) # Replace with llm_with_tools.invoke if you re-add tools
+    return {"messages": [response]}
 
 def summarize_node(state: State):
     summary = state.get('summary','')
@@ -213,14 +314,17 @@ database_path = os.path.join(base_dir, "chatbot.db")
 
 conn = sqlite3.connect(database=database_path, check_same_thread=False)
 checkpointer = SqliteSaver(conn)
+ltm_store = SimpleSQLliteStore(conn)
 
 graph = StateGraph(State)
 
 graph.add_node("chat_node",chat_node)
 graph.add_node("tools",tool_node)
 graph.add_node('summarize',summarize_node)
+graph.add_node('remember',remember_node)
 
-graph.add_edge(START,"chat_node")
+graph.add_edge(START,"remember")
+graph.add_edge("remember","chat_node")
 graph.add_conditional_edges("chat_node",route_after_chat,
                             {"tools": "tools",
                              "summarize": "summarize",

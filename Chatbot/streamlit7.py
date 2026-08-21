@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph5_context_window_backend import chatbot, checkpointer, ingest_pdf, database_path
+from langgraph6_LTM import chatbot, checkpointer, ingest_pdf, database_path
 import sqlite3
 import time
 from PIL import Image
@@ -160,7 +160,7 @@ if user_input:
     # 🟢 Construct config explicitly when the user presses Enter
     #active_config = {'configurable': {'thread_id': st.session_state.thread_id}}
     active_config  = {
-        'configurable': {'thread_id': st.session_state.thread_id},
+        'configurable': {'thread_id': st.session_state.thread_id,'user_id': 'abhimanyu_singh'},
         'metadata' : {'thread_id': st.session_state.thread_id},
         'run_name' : 'Chat Run Sequence'
     }
