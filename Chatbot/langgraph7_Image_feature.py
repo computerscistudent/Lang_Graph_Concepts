@@ -24,6 +24,7 @@ from pydantic import Field , BaseModel
 from typing import List
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
+import urllib.parse
 
 load_dotenv()
 
@@ -33,6 +34,8 @@ llm = ChatGroq(
     temperature=0.4,
     max_tokens=2048,
 )
+
+vision_llm = ChatGroq(model="llama-3.2-11b-vision-preview", api_key=os.getenv("GROQ_API_KEY"),temperature=0.4)#type:ignore
 
 extractor_llm = ChatOpenAI(model='gpt-4o-mini')
 
@@ -191,7 +194,19 @@ def rag_tool(query:str, config: RunnableConfig):
     #     "metadata":metadata
     # }
 
-tools = [get_stock_price , calculator, search_tool, rag_tool]
+@tool
+def generate_img(prompt:str):
+    """
+    Generates an image based on a text prompt. 
+    Use this tool ANYTIME the user asks to draw, create, or generate a picture or image.
+    """
+    encoded_prompt = urllib.parse.quote(prompt)
+    
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
+    
+    return f"![Generated Image]({image_url})\n\n[📥 Click here to view full size and download]({image_url})"
+
+tools = [get_stock_price , calculator, search_tool, rag_tool, generate_img]
 llm_with_tools = llm.bind_tools(tools,parallel_tool_calls=False)
 
 class State(TypedDict):

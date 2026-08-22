@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph6_LTM import chatbot, checkpointer, ingest_pdf, database_path
+from langgraph7_Image_feature import chatbot, checkpointer, ingest_pdf, database_path
 import sqlite3
 import time
 from PIL import Image
