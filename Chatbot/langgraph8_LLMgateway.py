@@ -25,12 +25,14 @@ import urllib.parse
 
 from litellm.router import Router
 from langchain_litellm import ChatLiteLLMRouter
+import litellm
+litellm.drop_params = True
 
 Models_List = [
     {
         "model_name":"chat_model",
         "litellm_params":{
-            "model" : "groq/llama3-8b-8192",
+            "model" : "groq/openai/gpt-oss-20b",
             "api_key": os.getenv("GROQ_API_KEY")
         }
     },
@@ -52,7 +54,7 @@ Models_List = [
 
 litellm_router = Router(model_list=Models_List)
 
-llm = ChatLiteLLMRouter(router = litellm_router,model='chat_model',temperature=0.4,max_tokens=2048)
+llm = ChatLiteLLMRouter(router = litellm_router,model='chat_model',temperature=0.4,max_tokens=2048,stop=["Human:", "User:", "HumanMessage", "System:", "\n\nHuman"])
 
 extractor_llm = ChatLiteLLMRouter(router=litellm_router,model='balanced-extraction',temperature=0.0)
 
@@ -327,7 +329,15 @@ def chat_node(state: State, config: RunnableConfig):
     ))
     
     summarized_index = state.get('summarized_index', 0)
-    mssg_to_pass = [sys_mssg] + state['messages'][summarized_index:]
+    raw_messages = [sys_mssg] + state['messages'][summarized_index:]
+
+    mssg_to_pass = []
+    for msg in raw_messages:
+        if isinstance(msg, AIMessage):
+            # Create a fresh, clean AIMessage keeping only what Groq needs
+            mssg_to_pass.append(AIMessage(content=msg.content, tool_calls=msg.tool_calls))
+        else:
+            mssg_to_pass.append(msg)
     
     response = llm_with_tools.invoke(mssg_to_pass) 
     return {"messages": [response]}
@@ -419,3 +429,4 @@ def retrieve_all_threads():
 if __name__=="__main__":
     pass
 #litellm.exceptions.BadRequestError: litellm.BadRequestError: GroqException - {"error":{"message":"The model `llama3-8b-8192` has been decommissioned and is no longer supported. Please refer to https://console.groq.com/docs/deprecations for a recommendation on which model to use instead.","type":"invalid_request_error","code":"model_decommissioned"}} . Received Model Group=chat_model Available Model Group Fallbacks=None
+#brother recommend me some good comedy movies like top 10

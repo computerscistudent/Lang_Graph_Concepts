@@ -1,0 +1,219 @@
+import streamlit as st
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph8_LLMgateway import chatbot, checkpointer, ingest_pdf, database_path
+import sqlite3
+import time
+from PIL import Image
+import uuid
+import os
+from audio_recorder_streamlit import audio_recorder
+from groq import Groq
+import tempfile
+
+os.environ['LANGCHAIN_PROJECT'] = "Chatbot Project"
+
+st.set_page_config(page_title="Axon Chatbot", page_icon="🤖", layout="wide")
+
+col1, col2 = st.columns([1, 5])
+
+with col1:
+    try:
+        logo = Image.open("Chatbot/logo1.png")
+        st.image(logo, width=80)
+    except FileNotFoundError:
+        st.markdown("🤖")
+with col2:
+    st.title("Axon Chatbot")
+    st.write("😀 Have a nice conversation...")
+
+# ******************************* utility functions *************************************
+def generate_thread_id():
+    return str(uuid.uuid4())
+
+def reset_chat():
+    new_id = generate_thread_id()
+    st.session_state.thread_id = new_id
+    st.session_state.chat_threads[new_id] = "New Chat..."
+    st.session_state.message_history = []
+
+def load_conversation(thread_id):
+    try:
+        state = chatbot.get_state(config={'configurable': {'thread_id': thread_id}})
+        if state and 'messages' in state.values:
+            return state.values['messages']
+    except Exception:
+        pass
+    return []
+
+# Initialize threads from the absolute SQLite database file
+if "chat_threads" not in st.session_state:
+    st.session_state.chat_threads = {}
+    try:
+        all_checkpoints = list(checkpointer.list(None))
+        for checkpoint in all_checkpoints:
+            t_id = checkpoint.config['configurable']['thread_id'] #type:ignore
+            if t_id not in st.session_state.chat_threads:
+                history = load_conversation(t_id)
+                if history:
+                    first_msg = history[0].content.strip()
+                    title = first_msg[:22] + "..." if len(first_msg) > 25 else first_msg
+                    st.session_state.chat_threads[t_id] = title
+                else:
+                    st.session_state.chat_threads[t_id] = "Empty Chat..."
+    except Exception:
+        pass
+
+    if not st.session_state.chat_threads:
+        initial_id = generate_thread_id()
+        st.session_state.chat_threads[initial_id] = "New Chat..."
+        st.session_state.thread_id = initial_id
+    else:
+        st.session_state.thread_id = list(st.session_state.chat_threads.keys())[-1]
+
+if "message_history" not in st.session_state:
+    st.session_state.message_history = load_conversation(st.session_state.thread_id)
+if "ingested_docs" not in st.session_state:
+    st.session_state.ingested_docs = {}
+
+if "processed_audio" not in st.session_state:
+    st.session_state.processed_audio = []
+
+thread_key = str(st.session_state.thread_id)
+thread_docs = st.session_state.ingested_docs.setdefault(thread_key,{})
+
+# ******************************* sidebar *************************************
+col3,col4,col_e = st.sidebar.columns([1, 2.5, 1.7])
+with col3:
+    st.markdown("<div style='padding-top: 8px;'></div>", unsafe_allow_html=True)
+    logo_img = Image.open('Chatbot/axon_chat.png')
+    st.image(logo_img, use_container_width=True)
+with col4:
+    st.markdown("## Axon Chats")
+    st.markdown(f"**Thread ID:** `{thread_key[:8]}...`")
+with col_e:
+    st.empty()
+if st.sidebar.button("New Chat"):
+    reset_chat()
+    st.rerun()
+
+if thread_docs :
+    latest_doc = list(thread_docs.values())[-1]
+    st.sidebar.success(
+        f"Using `{latest_doc.get('filename')}`\n\n"
+        f"`{latest_doc.get('chunks')}` chunks from `{latest_doc.get('documents')}` pages"
+    )
+else:
+    st.sidebar.info("No pdf indexed yet")
+
+uploaded_pdf = st.sidebar.file_uploader("Upload a pdf for this Chat", type=['pdf'])
+if uploaded_pdf:
+    if uploaded_pdf.name in thread_docs:
+        st.sidebar.info(f'`{uploaded_pdf.name}` already processed for this Chat.')
+    else:
+        with st.sidebar.status("Processing PDF into Vector Store..."):
+            file_bytes = uploaded_pdf.read()
+            doc_metadata = ingest_pdf(file_bytes=file_bytes,thread_id=thread_key,file_name=uploaded_pdf.name)
+            thread_docs[uploaded_pdf.name] = doc_metadata
+        st.rerun()
+
+col5, col6 = st.sidebar.columns([1, 4])
+with col5 :
+    convo_logo = Image.open('Chatbot/convo.png')
+    st.image(convo_logo, width='content')
+with col6 :
+    st.markdown("### My Conversations -:")
+
+for thread, title in reversed(st.session_state.chat_threads.items()):
+    col_chat, col_del = st.sidebar.columns([4, 1])
+    icon = "💬" if thread == st.session_state.thread_id else "📁"
+    with col_chat:
+        button_label = f"{icon} {title}"
+        if st.button(button_label, key=thread, use_container_width=True):
+            st.session_state.thread_id = thread
+            st.session_state.message_history = load_conversation(thread)
+            st.rerun()
+    with col_del:
+        if st.button("❌",key=f"del_{thread}"):
+            del st.session_state.chat_threads[thread]
+            if thread in st.session_state.ingested_docs:
+                del st.session_state.ingested_docs[thread]
+            try:
+                conn = sqlite3.connect(database=database_path)
+                cursor = conn.cursor()
+                cursor.execute("DELETE from checkpoints WHERE thread_id = ?",(thread,))
+                cursor.execute("DELETE FROM writes WHERE thread_id = ?", (thread,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Error deleting the chat-: {e}")
+
+            if st.session_state.thread_id == thread:
+                reset_chat()
+
+            st.rerun()
+
+for message in st.session_state.message_history:
+    if isinstance(message, HumanMessage):
+        with st.chat_message('user'):
+            st.write(message.content)
+    elif isinstance(message, AIMessage) and message.content:
+        with st.chat_message('assistant'):
+            st.write(message.content)
+
+with st.sidebar:
+    st.markdown("### 🎙️ Voice Input")
+    audio_file = st.audio_input("Click to record", key="audio_input")
+
+user_input = st.chat_input("Type here")
+
+if audio_file and audio_file.file_id not in st.session_state.processed_audio:
+    with st.spinner(text="Transcribing Audio..."):
+        groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        
+        # Read the raw bytes directly from the native Streamlit component
+        transcription = groq_client.audio.transcriptions.create(
+            file=("audio.wav", audio_file.read()), 
+            model="whisper-large-v3-turbo"
+        )
+        
+        user_input = transcription.text
+        st.session_state.processed_audio.append(audio_file.file_id)
+
+if user_input:
+    # 🟢 Construct config explicitly when the user presses Enter
+    #active_config = {'configurable': {'thread_id': st.session_state.thread_id}}
+    active_config  = {
+        'configurable': {'thread_id': st.session_state.thread_id,'user_id': 'abhimanyu_singh'},
+        'metadata' : {'thread_id': st.session_state.thread_id},
+        'run_name' : 'Chat Run Sequence'
+    }
+    
+    with st.chat_message("User"):
+        st.write(user_input)
+    
+    current_thread = st.session_state.thread_id
+    if st.session_state.chat_threads[current_thread] == "New Chat...":
+        clean_title = user_input.strip()
+        if len(clean_title) > 25:
+            clean_title = clean_title[:22] + "..."
+        st.session_state.chat_threads[current_thread] = clean_title
+
+    def response_generator():
+        stream = chatbot.stream(
+            {'messages': [HumanMessage(content=user_input)]},config=active_config, #type:ignore
+            stream_mode='messages'
+        )
+        for msg, metadata in stream:
+            if metadata.get("langgraph_node") == "chat_node":#type:ignore
+                if isinstance(msg, AIMessage):
+                    if isinstance(msg.content, str):
+                        time.sleep(0.006)
+                        yield msg.content #type:ignore
+        
+    with st.chat_message("assistant"):
+        ai_message = st.write_stream(response_generator())
+
+    # Instead of manually appending the messages, we load the exact updated state from the backend database. this guarantees the ToolMessages are saved in memory properly so the chatbot remembers context!
+    st.session_state.message_history = load_conversation(st.session_state.thread_id)
+
+    st.rerun()
